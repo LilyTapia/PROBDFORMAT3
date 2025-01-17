@@ -43,7 +43,6 @@ DECLARE
     SELECT
       cli.numrun,
       cli.dvrun,
-      ------------------------------ NUEVO: traemos el tipo de cliente
       cli.cod_tipo_cliente, 
       ttc.nro_tarjeta,
       ttc.nro_transaccion,

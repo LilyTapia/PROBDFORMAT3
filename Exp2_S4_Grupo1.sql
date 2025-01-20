@@ -6,39 +6,65 @@
 --                                CASO 1                                      --
 -- ***************************************************************************--
 
--- DEFINICIÓN DE VARIABLES BIND (PARÁMETROS)
-VARIABLE p_anio_anterior NUMBER
-EXEC :p_anio_anterior := EXTRACT(YEAR FROM ADD_MONTHS(SYSDATE, -12));
-
-VARIABLE p_rango1_inf NUMBER
-VARIABLE p_rango1_sup NUMBER
-VARIABLE p_rango2_inf NUMBER
-VARIABLE p_rango2_sup NUMBER
-VARIABLE p_rango3_inf NUMBER
-
-EXEC :p_rango1_inf :=  500000;
-EXEC :p_rango1_sup :=  700000;
-EXEC :p_rango2_inf :=  700001;
-EXEC :p_rango2_sup :=  900000;
-EXEC :p_rango3_inf :=  900001;
-
--------------------------------------------------------------------------------
--- BLOQUE PL/SQL ANÓNIMO
--------------------------------------------------------------------------------
+/*------------------------------------------------------------
+  1) DEFINICIÓN DE VARIABLES BIND (PARÁMETROS)
+------------------------------------------------------------*/
+VARIABLE p_anio_anterior NUMBER;
+BEGIN
+  :p_anio_anterior := EXTRACT(YEAR FROM ADD_MONTHS(SYSDATE, -12));
+END;
+/
+ 
+VARIABLE p_rango1_inf NUMBER;
+BEGIN
+  :p_rango1_inf := 500000;
+END;
+/
+ 
+VARIABLE p_rango1_sup NUMBER;
+BEGIN
+  :p_rango1_sup := 700000;
+END;
+/
+ 
+VARIABLE p_rango2_inf NUMBER;
+BEGIN
+  :p_rango2_inf := 700001;
+END;
+/
+ 
+VARIABLE p_rango2_sup NUMBER;
+BEGIN
+  :p_rango2_sup := 900000;
+END;
+/
+ 
+VARIABLE p_rango3_inf NUMBER;
+BEGIN
+  :p_rango3_inf := 900001;
+END;
+/
+ 
+/*------------------------------------------------------------
+  2) BLOQUE PL/SQL ANÓNIMO CON 2 CURSORES
+     - Cursor SIN parámetro (detalle)
+     - Cursor CON parámetro (resumen)
+     - Proceso de cálculo y llenado de tablas
+------------------------------------------------------------*/
 DECLARE
-  -----------------------------------------------------------------------------
-  -- VARRAY para los puntos (base + extras)
-  -----------------------------------------------------------------------------
+  ------------------------------------------------------------
+  -- (a) VARRAY para los puntos (base y extras)
+  ------------------------------------------------------------
   TYPE t_puntos IS VARRAY(4) OF NUMBER; 
   v_puntos t_puntos := t_puntos(250, 300, 550, 700);
   -- v_puntos(1)=250 -> Puntos base
   -- v_puntos(2)=300 -> Extra Rango 1
   -- v_puntos(3)=550 -> Extra Rango 2
   -- v_puntos(4)=700 -> Extra Rango 3
-
-  -----------------------------------------------------------------------------
-  -- Cursor SIN parámetro para DETALLE
-  -----------------------------------------------------------------------------
+  
+  ------------------------------------------------------------
+  -- (b) Cursor SIN parámetro (Variable de Cursor) para DETALLE
+  ------------------------------------------------------------
   CURSOR c_detalle_cur IS
     SELECT
       cli.numrun,
@@ -59,61 +85,50 @@ DECLARE
            ON ttc.cod_tptran_tarjeta = ttt.cod_tptran_tarjeta
     WHERE EXTRACT(YEAR FROM ttc.fecha_transaccion) = :p_anio_anterior
     ORDER BY ttc.fecha_transaccion, cli.numrun, ttc.nro_transaccion;
-
-  -----------------------------------------------------------------------------
-  -- Cursor CON parámetro para RESUMEN
-  -----------------------------------------------------------------------------
-  CURSOR c_resumen_cur(p_year NUMBER) IS
-    SELECT
-      TO_CHAR(ttc.fecha_transaccion,'MMYYY') AS mes_anno,
-      SUM(CASE WHEN ttt.nombre_tptran_tarjeta LIKE 'Compra%' THEN ttc.monto_transaccion ELSE 0 END) AS monto_total_compras,
-      0 AS total_puntos_compras,
-      SUM(CASE WHEN ttt.nombre_tptran_tarjeta = 'Avance en Efectivo' THEN ttc.monto_transaccion ELSE 0 END) AS monto_total_avances,
-      0 AS total_puntos_avances,
-      SUM(CASE WHEN ttt.nombre_tptran_tarjeta LIKE 'Súper Avance%' THEN ttc.monto_transaccion ELSE 0 END) AS monto_total_savances,
-      0 AS total_puntos_savances
-    FROM transaccion_tarjeta_cliente ttc
-         JOIN tipo_transaccion_tarjeta ttt
-           ON ttc.cod_tptran_tarjeta = ttt.cod_tptran_tarjeta
-    WHERE EXTRACT(YEAR FROM ttc.fecha_transaccion) = p_year
-    GROUP BY TO_CHAR(ttc.fecha_transaccion,'MMYYY')
-    ORDER BY TO_CHAR(ttc.fecha_transaccion,'MMYYY');
-
-  -----------------------------------------------------------------------------
-  -- Variables de tipo %ROWTYPE
-  -----------------------------------------------------------------------------
-  v_detalle  c_detalle_cur%ROWTYPE;
-  v_resumen  c_resumen_cur%ROWTYPE;
-
-  -----------------------------------------------------------------------------
-  -- Variables auxiliares para el cálculo de puntos
-  -----------------------------------------------------------------------------
-  v_factor_100k    NUMBER := 0;
-  v_base_points    NUMBER := 0;
-  v_extra_points   NUMBER := 0;
-
+  
+  ------------------------------------------------------------
+  -- (c) Cursor CON parámetro para RESUMEN
+  ------------------------------------------------------------
+  CURSOR c_resumen_cur (p_year NUMBER) IS
+    SELECT p_year AS anio_filtrado
+      FROM DUAL;
+    -- En este SELECT no recalculamos aquí los montos y puntos,
+    -- sino que más abajo haremos un FOR que lee DETALLE para agrupar.
+  ------------------------------------------------------------
+  -- (d) Variables %ROWTYPE y auxiliares de cálculo
+  ------------------------------------------------------------
+  v_detalle   c_detalle_cur%ROWTYPE;
+  v_dummy     c_resumen_cur%ROWTYPE;   -- Para leer desde el cursor con parámetro
+  
+  v_factor_100k   NUMBER := 0;
+  v_base_points   NUMBER := 0;
+  v_extra_points  NUMBER := 0;
+  
 BEGIN
-  -----------------------------------------------------------------------------
-  -- Truncamos las tablas de salida para permitir re-ejecución
-  -----------------------------------------------------------------------------
+  /*----------------------------------------------------------
+    (1) Truncamos las tablas de salida antes de recargar
+  ----------------------------------------------------------*/
   EXECUTE IMMEDIATE 'TRUNCATE TABLE DETALLE_PUNTOS_TARJETA_CATB';
   EXECUTE IMMEDIATE 'TRUNCATE TABLE RESUMEN_PUNTOS_TARJETA_CATB';
-
-  -----------------------------------------------------------------------------
-  -- PROCESAR DETALLE (Cursor sin parámetro)
-  -----------------------------------------------------------------------------
+  
+  /*----------------------------------------------------------
+    (2) LLENAR DETALLE (cursor sin parámetro):
+        - Calcula puntos (base + extras)
+        - Inserta en DETALLE_PUNTOS_TARJETA_CATB
+  ----------------------------------------------------------*/
   OPEN c_detalle_cur;
   LOOP
     FETCH c_detalle_cur INTO v_detalle;  
     EXIT WHEN c_detalle_cur%NOTFOUND;
-
-    -- 1) Cálculo de puntos base
+ 
+    -- (2a) Calcular factor en múltiplos de 100.000
     v_factor_100k := TRUNC(v_detalle.monto_transaccion / 100000);
-    v_base_points := v_factor_100k * v_puntos(1);  -- 250
+    
+    -- (2b) Puntos base
+    v_base_points := v_factor_100k * v_puntos(1);  -- 250 por cada 100.000
+    
+    -- (2c) Puntos extra para tipo de cliente 30 o 40, si cae en los rangos
     v_extra_points := 0;
-
-    -- 2) SOLO si el COD_TIPO_CLIENTE es 30 (dueña de casa) O 40 (pensionado),
-    --    aplicamos la lógica de rangos extras:
     IF v_detalle.cod_tipo_cliente IN (30, 40) THEN
        IF v_detalle.monto_transaccion BETWEEN :p_rango1_inf AND :p_rango1_sup THEN
           v_extra_points := v_factor_100k * v_puntos(2);  -- 300
@@ -123,11 +138,11 @@ BEGIN
           v_extra_points := v_factor_100k * v_puntos(4);  -- 700
        END IF;
     END IF;
-
-    -- 3) Suma final
+    
+    -- (2d) Total de puntos para la transacción
     v_detalle.puntos_allthebest := v_base_points + v_extra_points;
-
-    -- 4) Insertar en DETALLE_PUNTOS_TARJETA_CATB
+    
+    -- (2e) Insertar registro en tabla DETALLE
     INSERT INTO detalle_puntos_tarjeta_catb (
       numrun,
       dvrun,
@@ -137,8 +152,7 @@ BEGIN
       tipo_transaccion,
       monto_transaccion,
       puntos_allthebest
-    )
-    VALUES (
+    ) VALUES (
       v_detalle.numrun,
       v_detalle.dvrun,
       v_detalle.nro_tarjeta,
@@ -150,55 +164,80 @@ BEGIN
     );
   END LOOP;
   CLOSE c_detalle_cur;
-
-  -----------------------------------------------------------------------------
-  -- PROCESAR RESUMEN (Cursor con parámetro)
-  -----------------------------------------------------------------------------
+  
+  /*----------------------------------------------------------
+    (3) PROCESAR RESUMEN:
+        - Abrimos el cursor con parámetro c_resumen_cur
+          para “usar” p_year (:p_anio_anterior).
+        - Hacemos un FETCH.
+        - Luego, en un FOR, agrupamos la tabla DETALLE y
+          sumamos montos/puntos por mes.
+  ----------------------------------------------------------*/
   OPEN c_resumen_cur(:p_anio_anterior);
-  LOOP
-    FETCH c_resumen_cur INTO v_resumen;  
-    EXIT WHEN c_resumen_cur%NOTFOUND;
-
-    -- Puntos base para COMPRAS
-    v_factor_100k := TRUNC(v_resumen.monto_total_compras / 100000);
-    v_base_points := v_factor_100k * v_puntos(1);
-    v_extra_points := 0;
-    v_resumen.total_puntos_compras := v_base_points + v_extra_points;
-
-    -- Puntos base para AVANCES
-    v_factor_100k := TRUNC(v_resumen.monto_total_avances / 100000);
-    v_base_points := v_factor_100k * v_puntos(1);
-    v_extra_points := 0;
-    v_resumen.total_puntos_avances := v_base_points + v_extra_points;
-
-    -- Puntos base para SÚPER AVANCES
-    v_factor_100k := TRUNC(v_resumen.monto_total_savances / 100000);
-    v_base_points := v_factor_100k * v_puntos(1);
-    v_extra_points := 0;
-    v_resumen.total_puntos_savances := v_base_points + v_extra_points;
-
-    -- Insertar en RESUMEN_PUNTOS_TARJETA_CATB
-    INSERT INTO resumen_puntos_tarjeta_catb (
-      mes_anno,
-      monto_total_compras,
-      total_puntos_compras,
-      monto_total_avances,
-      total_puntos_avances,
-      monto_total_savances,
-      total_puntos_savances
-    )
-    VALUES (
-      v_resumen.mes_anno,
-      v_resumen.monto_total_compras,
-      v_resumen.total_puntos_compras,
-      v_resumen.monto_total_avances,
-      v_resumen.total_puntos_avances,
-      v_resumen.monto_total_savances,
-      v_resumen.total_puntos_savances
-    );
-  END LOOP;
+  FETCH c_resumen_cur INTO v_dummy;  
   CLOSE c_resumen_cur;
-
+  
+  /*----------------------------------------------------------
+    (3a) LLENAR RESUMEN DESDE DETALLE
+         - Sumamos montos y puntos, agrupando por mes
+  ----------------------------------------------------------*/
+  FOR reg_mes IN (
+    SELECT DISTINCT TO_CHAR(fecha_transaccion, 'MMYYYY') AS mes_anno
+      FROM detalle_puntos_tarjeta_catb
+     WHERE EXTRACT(YEAR FROM fecha_transaccion) = :p_anio_anterior
+     ORDER BY TO_CHAR(fecha_transaccion,'MMYYYY')
+  )
+  LOOP
+    DECLARE
+      v_monto_compras      NUMBER := 0;
+      v_puntos_compras     NUMBER := 0;
+      v_monto_avances      NUMBER := 0;
+      v_puntos_avances     NUMBER := 0;
+      v_monto_savances     NUMBER := 0;
+      v_puntos_savances    NUMBER := 0;
+    BEGIN
+      SELECT
+        SUM(CASE WHEN tipo_transaccion LIKE 'Compras%' THEN monto_transaccion ELSE 0 END),
+        SUM(CASE WHEN tipo_transaccion LIKE 'Compras%' THEN puntos_allthebest  ELSE 0 END),
+        SUM(CASE WHEN tipo_transaccion = 'Avance en Efectivo' THEN monto_transaccion ELSE 0 END),
+        SUM(CASE WHEN tipo_transaccion = 'Avance en Efectivo' THEN puntos_allthebest  ELSE 0 END),
+        SUM(CASE WHEN tipo_transaccion LIKE 'S�per Avance%' THEN monto_transaccion ELSE 0 END),
+        SUM(CASE WHEN tipo_transaccion LIKE 'S�per Avance%' THEN puntos_allthebest  ELSE 0 END)
+      INTO
+        v_monto_compras,
+        v_puntos_compras,
+        v_monto_avances,
+        v_puntos_avances,
+        v_monto_savances,
+        v_puntos_savances
+      FROM detalle_puntos_tarjeta_catb
+      WHERE TO_CHAR(fecha_transaccion, 'MMYYYY') = reg_mes.mes_anno;
+      
+      INSERT INTO resumen_puntos_tarjeta_catb (
+        mes_anno,
+        monto_total_compras,
+        total_puntos_compras,
+        monto_total_avances,
+        total_puntos_avances,
+        monto_total_savances,
+        total_puntos_savances
+      )
+      VALUES (
+        reg_mes.mes_anno,
+        v_monto_compras,
+        v_puntos_compras,
+        v_monto_avances,
+        v_puntos_avances,
+        v_monto_savances,
+        v_puntos_savances
+      );
+    END;
+  END LOOP;
+  
+  /*----------------------------------------------------------
+    (4) COMMIT final y mensaje
+  ----------------------------------------------------------*/
+  COMMIT;
   DBMS_OUTPUT.PUT_LINE('Proceso finalizado OK para año anterior=' || :p_anio_anterior);
 
 EXCEPTION
@@ -207,9 +246,19 @@ EXCEPTION
     ROLLBACK;
 END;
 /
+ 
+/*------------------------------------------------------------
+  3) CONSULTAS DE VALIDACIÓN FINAL
+------------------------------------------------------------*/
 
-SELECT * FROM detalle_puntos_tarjeta_catb;
-SELECT * FROM resumen_puntos_tarjeta_catb;
+
+SELECT * 
+FROM detalle_puntos_tarjeta_catb;
+SELECT * 
+FROM resumen_puntos_tarjeta_catb;
 
 
 
+
+   
+     

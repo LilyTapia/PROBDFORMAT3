@@ -257,8 +257,111 @@ FROM detalle_puntos_tarjeta_catb;
 SELECT * 
 FROM resumen_puntos_tarjeta_catb;
 
+==============================================================================================
+------------------------------------------- CASO 2 -------------------------------------------
+==============================================================================================
+
+UPDATE TIPO_TRANSACCION_TARJETA -- Eliminamos el caracter raro
+SET nombre_tptran_tarjeta = 'Super Avance en Efectivo'
+WHERE nombre_tptran_tarjeta LIKE '%S�per Avance en Efectivo%'; -- Busca y actualiza la versión con caracter "raro"
+COMMIT;
 
 
+-- Bloque PL/SQL Anónimo para generar información requerida
 
-   
-     
+DECLARE
+  -- Variables para el cálculo del aporte
+  v_monto_total_transaccion TRANSACCION_TARJETA_CLIENTE.monto_total_transaccion%TYPE;
+  v_aporte_sbif DETALLE_APORTE_SBIF.aporte_sbif%TYPE;
+  v_porc_aporte_sbif TRAMO_APORTE_SBIF.porc_aporte_sbif%TYPE;
+
+  -- Variables para el manejo de cursores y datos
+  v_numrun CLIENTE.numrun%TYPE;
+  v_dvrun CLIENTE.dvrun%TYPE;
+  v_nro_tarjeta TARJETA_CLIENTE.nro_tarjeta%TYPE;
+  v_nro_transaccion TRANSACCION_TARJETA_CLIENTE.nro_transaccion%TYPE;
+  v_fecha_transaccion TRANSACCION_TARJETA_CLIENTE.fecha_transaccion%TYPE;
+  v_tipo_transaccion TIPO_TRANSACCION_TARJETA.nombre_tptran_tarjeta%TYPE;
+  v_mes_anno VARCHAR2(6);
+
+  -- Cursores Explícitos
+  CURSOR c_detalle_transacciones IS
+    SELECT c.numrun, c.dvrun, ttc.nro_tarjeta, ttc.nro_transaccion, ttc.fecha_transaccion, ttt.nombre_tptran_tarjeta, ttc.monto_total_transaccion
+    FROM CLIENTE c
+    JOIN TARJETA_CLIENTE tc ON c.numrun = tc.numrun
+    JOIN TRANSACCION_TARJETA_CLIENTE ttc ON tc.nro_tarjeta = ttc.nro_tarjeta
+    JOIN TIPO_TRANSACCION_TARJETA ttt ON ttc.cod_tptran_tarjeta = ttt.cod_tptran_tarjeta
+    WHERE EXTRACT(YEAR FROM ttc.fecha_transaccion) = EXTRACT(YEAR FROM SYSDATE)
+      AND ttt.nombre_tptran_tarjeta IN ('Super Avance en Efectivo', 'Avance en Efectivo'); -- Filtro de Super Avance y Avance
+
+  CURSOR c_resumen_transacciones(p_mes_anno VARCHAR2, p_tipo_transaccion VARCHAR2) IS
+    SELECT SUM(ttc.monto_total_transaccion), SUM(da.aporte_sbif)
+    FROM TRANSACCION_TARJETA_CLIENTE ttc
+    JOIN TIPO_TRANSACCION_TARJETA ttt ON ttc.cod_tptran_tarjeta = ttt.cod_tptran_tarjeta
+    JOIN DETALLE_APORTE_SBIF da ON ttc.nro_tarjeta = da.nro_tarjeta AND ttc.nro_transaccion = da.nro_transaccion
+    WHERE TO_CHAR(ttc.fecha_transaccion, 'MMYYYY') = p_mes_anno
+      AND ttt.nombre_tptran_tarjeta = p_tipo_transaccion;
+
+BEGIN
+  -- Truncamos las tablas con EXECUTE INMEDIATE
+  EXECUTE IMMEDIATE 'TRUNCATE TABLE DETALLE_APORTE_SBIF';
+  EXECUTE IMMEDIATE 'TRUNCATE TABLE RESUMEN_APORTE_SBIF';
+
+  -- Abrimos el cursor de detalle
+  OPEN c_detalle_transacciones;
+  LOOP
+    FETCH c_detalle_transacciones INTO v_numrun, v_dvrun, v_nro_tarjeta, v_nro_transaccion, v_fecha_transaccion, v_tipo_transaccion, v_monto_total_transaccion;
+    EXIT WHEN c_detalle_transacciones%NOTFOUND;
+
+    --  Cálculo del aporte para la SBIF con manejo de rangos
+    BEGIN
+      SELECT porc_aporte_sbif INTO v_porc_aporte_sbif
+      FROM TRAMO_APORTE_SBIF
+      WHERE v_monto_total_transaccion BETWEEN tramo_inf_av_sav AND tramo_sup_av_sav;
+    EXCEPTION
+      WHEN NO_DATA_FOUND THEN
+        -- Manejo de error si el monto no cae en ningún rango
+        DBMS_OUTPUT.PUT_LINE('Error: Monto de transacción ' || v_monto_total_transaccion || ' fuera de rango en la tabla TRAMO_APORTE_SBIF.');
+        v_porc_aporte_sbif := 0; 
+    END;
+
+    v_aporte_sbif := (v_monto_total_transaccion * v_porc_aporte_sbif) / 100;
+
+    -- Insertamos en la tabla de DETALLE_APORTE_SBIF
+    INSERT INTO DETALLE_APORTE_SBIF (numrun, dvrun, nro_tarjeta, nro_transaccion, fecha_transaccion, tipo_transaccion, monto_transaccion, aporte_sbif)
+    VALUES (v_numrun, v_dvrun, v_nro_tarjeta, v_nro_transaccion, v_fecha_transaccion, v_tipo_transaccion, v_monto_total_transaccion, v_aporte_sbif);
+
+  END LOOP;
+  CLOSE c_detalle_transacciones;
+
+  -- Procesamos la información resumida
+  FOR rec IN (SELECT DISTINCT TO_CHAR(fecha_transaccion, 'MMYYYY') mes_anno, nombre_tptran_tarjeta tipo_transaccion
+              FROM TRANSACCION_TARJETA_CLIENTE ttc
+              JOIN TIPO_TRANSACCION_TARJETA ttt ON ttc.cod_tptran_tarjeta = ttt.cod_tptran_tarjeta
+              WHERE EXTRACT(YEAR FROM ttc.fecha_transaccion) = EXTRACT(YEAR FROM SYSDATE)
+                AND ttt.nombre_tptran_tarjeta IN ('Super Avance en Efectivo', 'Avance en Efectivo')
+              ORDER BY mes_anno, tipo_transaccion) LOOP
+    v_mes_anno := rec.mes_anno;
+    v_tipo_transaccion := rec.tipo_transaccion;
+
+    OPEN c_resumen_transacciones(v_mes_anno, v_tipo_transaccion);
+    FETCH c_resumen_transacciones INTO v_monto_total_transaccion, v_aporte_sbif;
+    CLOSE c_resumen_transacciones;
+
+    -- Insertamos en la tabla RESUMEN_APORTE_SBIF
+    INSERT INTO RESUMEN_APORTE_SBIF (mes_anno, tipo_transaccion, monto_total_transacciones, aporte_total_abif)
+    VALUES (v_mes_anno, v_tipo_transaccion, v_monto_total_transaccion, v_aporte_sbif);
+  END LOOP;
+
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Proceso completado.'); -- Salida DBMS cuando el proceso se completa con éxito
+
+EXCEPTION
+  WHEN OTHERS THEN
+    ROLLBACK;
+    DBMS_OUTPUT.PUT_LINE('Error: ' || SQLERRM);
+END;
+/
+
+SELECT * FROM RESUMEN_APORTE_SBIF; -- Consulta para comprobar la tabla resumen aporte sbif con todos los valores ingresados
+SELECT * FROM DETALLE_APORTE_SBIF; -- Consulta para comprobar la tabla detalle aporte sbif con todos los valores ingresados
